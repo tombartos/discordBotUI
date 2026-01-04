@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { LosslessNumber, parse as losslessParse } from 'lossless-json'
 import './App.css'
 
 function joinUrl(base, path) {
@@ -25,7 +26,47 @@ async function fetchJson(url, { signal } = {}) {
   }
 
   if (response.status === 204) return null
-  return response.json()
+
+  const text = await response.text()
+  if (!text) return null
+
+  return losslessParse(text, (key, value) => {
+    if (key === 'id') {
+      if (value instanceof LosslessNumber) return value.toString()
+      if (typeof value === 'number') return String(value)
+    }
+    return value
+  })
+}
+
+async function putJson(url, { signal } = {}) {
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: { Accept: 'application/json' },
+    signal,
+  })
+
+  if (!response.ok) {
+    const error = new Error(`Request failed: ${response.status} ${response.statusText}`)
+    error.status = response.status
+    throw error
+  }
+
+  if (response.status === 204) return null
+
+  try {
+    const text = await response.text()
+    if (!text) return null
+    return losslessParse(text, (key, value) => {
+      if (key === 'id') {
+        if (value instanceof LosslessNumber) return value.toString()
+        if (typeof value === 'number') return String(value)
+      }
+      return value
+    })
+  } catch {
+    return null
+  }
 }
 
 function asArray(payload) {
@@ -56,6 +97,43 @@ function formatJoinedDate(isoLike) {
 function emptyDash(value) {
   if (value === null || value === undefined || value === '') return '—'
   return String(value)
+}
+
+function displayInvitationLink(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'string') return value
+
+  if (typeof value === 'object') {
+    const maybeLink = value.invitationLink ?? value.code ?? value.url
+    if (typeof maybeLink === 'string' && maybeLink.trim()) return maybeLink
+  }
+
+  return String(value)
+}
+
+function invitationCodeFromValue(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+
+  const withoutQuery = raw.split('?')[0]
+  const withoutHash = withoutQuery.split('#')[0]
+
+  // If it's a URL, prefer URL parsing.
+  if (/^https?:\/\//i.test(withoutHash)) {
+    try {
+      const url = new URL(withoutHash)
+      const parts = url.pathname.split('/').filter(Boolean)
+      return parts.at(-1) ?? ''
+    } catch {
+      // Fall through to string heuristics.
+    }
+  }
+
+  // Common Discord formats: discord.gg/CODE, discord.com/invite/CODE
+  const normalized = withoutHash.replace(/^.*discord\.(gg|com)\//i, '')
+  const parts = normalized.split('/').filter(Boolean)
+  const last = parts.at(-1) ?? ''
+  return last.replace(/^invite\//i, '')
 }
 
 function Section({ title, subtitle, children }) {
@@ -136,6 +214,13 @@ function App() {
     data: [],
     loading: true,
     error: null,
+  })
+
+  const [selectedRoleId, setSelectedRoleId] = useState('')
+  const [selectedInviteLink, setSelectedInviteLink] = useState('')
+  const [associationState, setAssociationState] = useState({
+    status: 'idle',
+    message: '',
   })
 
   useEffect(() => {
@@ -223,6 +308,30 @@ function App() {
     }
   }, [apiBase])
 
+  useEffect(() => {
+    setSelectedRoleId((prev) =>
+      prev && rolesState.data.some((r) => String(r.id) === prev) ? prev : '',
+    )
+  }, [rolesState.data])
+
+  useEffect(() => {
+    setSelectedInviteLink((prev) =>
+      prev && invitesState.data.some((i) => String(i.invitationLink) === prev) ? prev : '',
+    )
+  }, [invitesState.data])
+
+  const selectedRole = rolesState.data.find((r) => String(r.id) === selectedRoleId) ?? null
+  const selectedInviteCode = invitationCodeFromValue(selectedInviteLink)
+  const canConfirm = Boolean(selectedRole && selectedInviteCode)
+
+  let roleSelectPlaceholder = 'Select a role'
+  if (rolesState.loading) roleSelectPlaceholder = 'Loading roles…'
+  else if (rolesState.error) roleSelectPlaceholder = 'Roles unavailable'
+
+  let inviteSelectPlaceholder = 'Select an invitation link'
+  if (invitesState.loading) inviteSelectPlaceholder = 'Loading invitation links…'
+  else if (invitesState.error) inviteSelectPlaceholder = 'Invitation links unavailable'
+
   return (
     <div className="app">
       <header className="appHeader">
@@ -260,6 +369,109 @@ function App() {
 
       <main className="grid">
         <Section
+          title="Associate Invitation Link"
+          subtitle="Choose a role and an invitation link (placeholder UI)"
+        >
+          <fieldset className="formGrid" aria-label="associate invitation link with role">
+            <legend className="fieldLegend">Selection</legend>
+            <div className="formField">
+              <label className="fieldLabel" htmlFor="roleSelect">
+                Role
+              </label>
+              <select
+                id="roleSelect"
+                className="select"
+                value={selectedRoleId}
+                onChange={(e) => {
+                  setSelectedRoleId(e.target.value)
+                  setAssociationState({ status: 'idle', message: '' })
+                }}
+                disabled={rolesState.loading || Boolean(rolesState.error) || rolesState.data.length === 0}
+              >
+                <option value="">{roleSelectPlaceholder}</option>
+                {rolesState.data.map((role) => (
+                  <option key={String(role.id)} value={String(role.id)}>
+                    {role.roleName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="formField">
+              <label className="fieldLabel" htmlFor="inviteSelect">
+                Invitation Link
+              </label>
+              <select
+                id="inviteSelect"
+                className="select"
+                value={selectedInviteLink}
+                onChange={(e) => {
+                  setSelectedInviteLink(e.target.value)
+                  setAssociationState({ status: 'idle', message: '' })
+                }}
+                disabled={invitesState.loading || Boolean(invitesState.error) || invitesState.data.length === 0}
+              >
+                <option value="">{inviteSelectPlaceholder}</option>
+                {invitesState.data.map((invite) => {
+                  const link = String(invite.invitationLink)
+                  return (
+                    <option key={`${String(invite.id)}:${link}`} value={link}>
+                      {link}
+                    </option>
+                  )
+                })}
+              </select>
+            </div>
+          </fieldset>
+
+          <div className="buttonRow">
+            <button
+              type="button"
+              onClick={async () => {
+                const inviteCode = invitationCodeFromValue(selectedInviteLink)
+                if (!selectedRole || !inviteCode) return
+                setAssociationState({ status: 'saving', message: 'Saving…' })
+                try {
+                  const path = `/role/${encodeURIComponent(String(selectedRole.id))}/${encodeURIComponent(
+                    inviteCode,
+                  )}`
+                  const url = joinUrl(apiBase, path)
+                  await putJson(url)
+
+                  setRolesState((prev) => ({
+                    ...prev,
+                    data: (prev.data ?? []).map((role) =>
+                      String(role.id) === String(selectedRole.id)
+                        ? { ...role, invitationLink: inviteCode }
+                        : role,
+                    ),
+                  }))
+
+                  setAssociationState({
+                    status: 'success',
+                    message: `Saved: ${selectedRole.roleName} -> ${inviteCode}`,
+                  })
+                } catch (err) {
+                  setAssociationState({
+                    status: 'error',
+                    message: `Failed to save: ${String(err?.message ?? err)}`,
+                  })
+                }
+              }}
+              disabled={!canConfirm || associationState.status === 'saving'}
+            >
+              Confirm
+            </button>
+          </div>
+
+          {associationState.message ? (
+            <div className={`status ${associationState.status === 'error' ? 'error' : ''}`}>
+              {associationState.message}
+            </div>
+          ) : null}
+        </Section>
+
+        <Section
           title="Roles"
           subtitle={rolesState.loading ? 'Loading…' : `Total: ${rolesState.data.length}`}
         >
@@ -274,7 +486,7 @@ function App() {
               columns={[
                 { header: 'ID', render: (r) => String(r.id) },
                 { header: 'Role', render: (r) => r.roleName },
-                { header: 'Invitation Link', render: (r) => emptyDash(r.invitationLink) },
+                { header: 'Invitation Link', render: (r) => displayInvitationLink(r.invitationLink) },
               ]}
             />
           )}
@@ -303,7 +515,7 @@ function App() {
                       ? u.roles
                         .map((role) =>
                           role.invitationLink
-                            ? `${role.roleName} (${role.invitationLink})`
+                            ? `${role.roleName} (${displayInvitationLink(role.invitationLink)})`
                             : role.roleName,
                         )
                         .join(', ')
